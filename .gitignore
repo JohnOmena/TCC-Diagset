@@ -1,0 +1,43 @@
+# ==========
+# Raiz do projeto
+# ==========
+
+# Dados e checkpoints grandes na raiz
+Checkpoints_and_data/
+distributions/
+partitions/
+
+# ==========
+# Dentro de src
+# ==========
+
+# Dados / checkpoints / logs / wandb dentro de src
+src/checkpoints/
+src/data/
+src/logs/
+src/wandb/
+src/__pycache__/
+
+# ==========
+# Python em geral
+# ==========
+
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# ==========
+# IDEs / editor
+# ==========
+
+.vscode/
+.idea/
+
+# ==========
+# Ambientes virtuais
+# ==========
+
+env/
+.venv/
+*.env
