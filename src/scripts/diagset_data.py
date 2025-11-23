@@ -10,8 +10,11 @@ Dataset utilitário para a base DIAGSET-A (pipeline do artigo):
     - Horizontal Flip
     - Rotação {0°, 90°, 180°, 270°}
 • Dois modos de rótulo:
-      mode="s5" → 9 classes  (A, BG, N, R1–R5, T)
-      mode="s1" → binário    (Benign × Malign)
+      mode="s5" → 9 classes  (BG, T, N, A, R1–R5)
+      mode="s1" → binário    (não-câncer × câncer),
+                   com mapeamento alinhado ao paper:
+                   0 = {BG, T, N, A}
+                   1 = {R1, R2, R3, R4, R5}
 """
 
 from __future__ import annotations
@@ -25,30 +28,54 @@ from PIL import Image
 from torchvision import transforms as T
 
 # ---------- mapeamentos ----------
+# S5: 9 classes separadas, na ordem lógica do artigo:
+# BG, T, N, A, R1, R2, R3, R4, R5
 LABEL2IDX_S5: Dict[str, int] = {
-    "A": 0, "BG": 1, "N": 2,
-    "R1": 3, "R2": 4, "R3": 5, "R4": 6, "R5": 7,
-    "T": 8,
+    "BG": 0,
+    "T":  1,
+    "N":  2,
+    "A":  3,
+    "R1": 4,
+    "R2": 5,
+    "R3": 6,
+    "R4": 7,
+    "R5": 8,
 }
 
+
 def label_to_idx(lbl: str, mode: Literal["s5", "s1"]) -> int:
+    """
+    Converte o rótulo textual (A/BG/N/T/R1–R5) para índice numérico.
+
+    mode = "s5":
+        9 classes (BG, T, N, A, R1–R5)
+
+    mode = "s1":
+        binário, alinhado ao artigo DiagSet:
+            0 = não-câncer → {BG, T, N, A}
+            1 = câncer     → {R1, R2, R3, R4, R5}
+    """
     if mode == "s5":
         return LABEL2IDX_S5[lbl]
-    # S1 → benigno vs maligno
-    return 0 if lbl in {"A", "BG", "N"} else 1
+
+    # S1 → não-câncer vs câncer (mapeamento do paper)
+    return 0 if lbl in {"BG", "T", "N", "A"} else 1
+
 
 # ---------- transforms ----------
 IMNET_MEAN = (0.485, 0.456, 0.406)
 IMNET_STD  = (0.229, 0.224, 0.225)
 
-class RandomRotate90:           # compatível com qualquer versão do torchvision
-    """Rotaciona a imagem por múltiplos de 90°."""
+
+class RandomRotate90:
+    """Rotaciona a imagem por múltiplos de 90° (compatível com qualquer versão do torchvision)."""
     def __call__(self, img: Image.Image) -> Image.Image:
         k = np.random.randint(0, 4)   # 0,1,2,3
         return img.rotate(90 * k)
 
     def __repr__(self):              # para aparecer no print(transform)
         return f"{self.__class__.__name__}()"
+
 
 def _build_transforms(train: bool, crop_size: int):
     if train:
@@ -65,6 +92,7 @@ def _build_transforms(train: bool, crop_size: int):
             T.ToTensor(),
             T.Normalize(IMNET_MEAN, IMNET_STD),
         ])
+
 
 # ---------- Dataset ----------
 class DiagSetAPatchDataset(Dataset):
@@ -107,12 +135,15 @@ class DiagSetAPatchDataset(Dataset):
         return mm[int(row.patch_idx)]        # (256,256,3) uint8
 
     # ---- Dataset ----
-    def __len__(self): return len(self.df)
+    def __len__(self) -> int:
+        return len(self.df)
 
     def __getitem__(self, idx: int):
         row = self.df.iloc[idx]
         img_np = self._read_patch(row)
         img = self.tfm(Image.fromarray(img_np))
         label_idx = label_to_idx(row.label, self.mode)
-        return {"image": img,
-                "label": torch.tensor(label_idx, dtype=torch.long)}
+        return {
+            "image": img,
+            "label": torch.tensor(label_idx, dtype=torch.long),
+        }
