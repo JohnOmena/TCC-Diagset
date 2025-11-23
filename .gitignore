@@ -2,6 +2,10 @@
 # Raiz do projeto
 # ==========
 
+wandb_api_resume.py
+lista.txt
+DiagSetA_wandb_runs_flat.csv
+
 # Dados e checkpoints grandes na raiz
 Checkpoints_and_data/
 distributions/

@@ -45,7 +45,7 @@ os.environ["WANDB_START_METHOD"]    = "thread"
 
 # ---------------- CONFIG -------------
 class CONFIG:
-    model   = "convnext"             # "effnet" | "convnext" | "swin"
+    model   = "convnext"             # "effnet" | "convnext" | "swin" | "deit"
     mag     = "20x"              # "5x" | "10x" | "20x" | "40x"
     schema  = "s1"               # "s5" | "s1"
     split   = "A.2"              # "A.1" | "A.2"
