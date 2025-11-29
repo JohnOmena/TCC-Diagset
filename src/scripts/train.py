@@ -27,7 +27,7 @@ from sklearn.metrics import f1_score, accuracy_score, confusion_matrix
 import wandb, seaborn as sns, matplotlib.pyplot as plt
 from tqdm import tqdm
 from PIL import Image                                            # ← NEW
-from diagset_data import DiagSetAPatchDataset
+from scripts.diagset_data import DiagSetAPatchDataset
 
 
 # ╭───────────────────  RESUME SETTINGS  ───────────────────╮
@@ -337,6 +337,85 @@ def main(cfg: CONFIG):
                 print("Early stopped."); break
 
     csvf.close(); wandb.finish()
+
+
+def evaluate_split(cfg: CONFIG, split_name: str = "test", ckpt_path: str | None = None):
+    """
+    Avalia um modelo treinado em um split especifico (por padrao, 'test').
+
+    Usa:
+      - mesmas configs de schema/mag/model definidas em cfg
+      - ckpt_best_{model}_{schema}.pt por padrao, ou um caminho passado em ckpt_path
+    """
+    seed_everything(cfg.seed)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    # --- dataset ---
+    split_dir = Path(f"data/splits_{cfg.split}_{cfg.mag}")
+    csv_path  = split_dir / f"{split_name}.csv"
+    print(f"[EVAL] Lendo CSV: {csv_path}")
+    df = pd.read_csv(csv_path)
+
+    ds = DiagSetAPatchDataset(
+        df,
+        train=False,                      # sem augment aleatorio
+        mode=cfg.schema,
+        crop_size=cfg.img_size,
+    )
+    dl = DataLoader(
+        ds,
+        batch_size=cfg.batch_gpu * 2,
+        shuffle=False,
+        num_workers=0,
+        pin_memory=False,
+    )
+
+    # --- modelo ---
+    n_cls = 9 if cfg.schema == "s5" else 2
+    model = get_model(cfg.model, n_cls).to(device)
+
+    # escolher checkpoint: best por padrao
+    if ckpt_path is None:
+        ckpt_dir  = Path("checkpoints") / cfg.mag
+        ckpt_file = ckpt_dir / f"ckpt_best_{cfg.model}_{cfg.schema}.pt"
+    else:
+        ckpt_file = Path(ckpt_path)
+
+    print(f"[EVAL] Carregando checkpoint: {ckpt_file}")
+    state = torch.load(ckpt_file, map_location=device)
+
+    # ckpt_best salva so state_dict; ckpt_last salva um dict maior
+    if isinstance(state, dict) and "model" in state:
+        model.load_state_dict(state["model"])
+    else:
+        model.load_state_dict(state)
+
+    model.eval()
+    criterion = nn.CrossEntropyLoss()
+
+    preds, gts = [], []
+    loss_total = 0.0
+
+    from tqdm import tqdm
+    with torch.no_grad(), torch.autocast(device_type=device, enabled=(device == "cuda")):
+        for b in tqdm(dl, desc=f"EVAL {split_name}"):
+            x = b["image"].to(device)
+            y = b["label"].to(device)
+            out = model(x)
+            loss_total += criterion(out, y).item()
+            preds.extend(out.argmax(1).cpu())
+            gts.extend(y.cpu())
+
+    loss = loss_total / len(dl)
+    f1   = f1_score(gts, preds, average="macro")
+    acc  = accuracy_score(gts, preds)
+    cm   = confusion_matrix(gts, preds, labels=list(range(n_cls)))
+
+    print(f"[EVAL {split_name}] loss={loss:.4f} acc={acc:.4f} f1={f1:.4f}")
+    print("Matriz de confusao:")
+    print(cm)
+
+    return {"loss": loss, "acc": acc, "f1": f1, "cm": cm}
 
 
 # ------------- launcher -------------
