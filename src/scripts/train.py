@@ -29,6 +29,14 @@ from tqdm import tqdm
 from PIL import Image                                            # ← NEW
 from scripts.diagset_data import DiagSetAPatchDataset
 
+from scripts.label_schemes import (
+    collapse_to_S1,
+    collapse_to_S2,
+    collapse_to_S3,
+    collapse_to_S4,
+)
+
+
 
 # ╭───────────────────  RESUME SETTINGS  ───────────────────╮
 RESUME_RUN_ID    = "cdiopf59"   # "" ou None ⇒ começa run nova
@@ -339,14 +347,22 @@ def main(cfg: CONFIG):
     csvf.close(); wandb.finish()
 
 
-def evaluate_split(cfg: CONFIG, split_name: str = "test", ckpt_path: str | None = None):
+def evaluate_split(cfg: CONFIG, split_name: str = "test", ckpt_path: Optional[str] = None):
     """
-    Avalia um modelo treinado em um split especifico (por padrao, 'test').
+    Avalia um modelo treinado em um split específico (por padrão, 'test').
 
     Usa:
       - mesmas configs de schema/mag/model definidas em cfg
-      - ckpt_best_{model}_{schema}.pt por padrao, ou um caminho passado em ckpt_path
+      - ckpt_best_{model}_{schema}.pt por padrão, ou um caminho passado em ckpt_path
+
+    Se cfg.schema == "s5":
+      - calcula métricas em S5 (9 classes)
+      - deriva e calcula métricas em S1, S2, S3 e S4 a partir dos rótulos S5.
     """
+    import pandas as pd
+    from sklearn.metrics import f1_score, accuracy_score, confusion_matrix
+    from torch.utils.data import DataLoader
+
     seed_everything(cfg.seed)
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -358,7 +374,7 @@ def evaluate_split(cfg: CONFIG, split_name: str = "test", ckpt_path: str | None 
 
     ds = DiagSetAPatchDataset(
         df,
-        train=False,                      # sem augment aleatorio
+        train=False,                      # sem augment aleatório
         mode=cfg.schema,
         crop_size=cfg.img_size,
     )
@@ -374,7 +390,7 @@ def evaluate_split(cfg: CONFIG, split_name: str = "test", ckpt_path: str | None 
     n_cls = 9 if cfg.schema == "s5" else 2
     model = get_model(cfg.model, n_cls).to(device)
 
-    # escolher checkpoint: best por padrao
+    # escolher checkpoint: best por padrão
     if ckpt_path is None:
         ckpt_dir  = Path("checkpoints") / cfg.mag
         ckpt_file = ckpt_dir / f"ckpt_best_{cfg.model}_{cfg.schema}.pt"
@@ -384,7 +400,7 @@ def evaluate_split(cfg: CONFIG, split_name: str = "test", ckpt_path: str | None 
     print(f"[EVAL] Carregando checkpoint: {ckpt_file}")
     state = torch.load(ckpt_file, map_location=device)
 
-    # ckpt_best salva so state_dict; ckpt_last salva um dict maior
+    # ckpt_best salva só state_dict; ckpt_last salva um dict maior
     if isinstance(state, dict) and "model" in state:
         model.load_state_dict(state["model"])
     else:
@@ -393,29 +409,80 @@ def evaluate_split(cfg: CONFIG, split_name: str = "test", ckpt_path: str | None 
     model.eval()
     criterion = nn.CrossEntropyLoss()
 
-    preds, gts = [], []
+    all_preds = []
+    all_gts   = []
     loss_total = 0.0
 
     from tqdm import tqdm
-    with torch.no_grad(), torch.autocast(device_type=device, enabled=(device == "cuda")):
+    autocast_kwargs = {"device_type": "cuda"} if device == "cuda" else {}
+
+    with torch.no_grad(), torch.autocast(enabled=(device == "cuda"), **autocast_kwargs):
         for b in tqdm(dl, desc=f"EVAL {split_name}"):
             x = b["image"].to(device)
             y = b["label"].to(device)
             out = model(x)
             loss_total += criterion(out, y).item()
-            preds.extend(out.argmax(1).cpu())
-            gts.extend(y.cpu())
+            preds = out.argmax(1)
+            all_preds.append(preds.cpu())
+            all_gts.append(y.cpu())
+
+    # empilha tudo
+    all_preds = torch.cat(all_preds).numpy()
+    all_gts   = torch.cat(all_gts).numpy()
 
     loss = loss_total / len(dl)
-    f1   = f1_score(gts, preds, average="macro")
-    acc  = accuracy_score(gts, preds)
-    cm   = confusion_matrix(gts, preds, labels=list(range(n_cls)))
 
-    print(f"[EVAL {split_name}] loss={loss:.4f} acc={acc:.4f} f1={f1:.4f}")
-    print("Matriz de confusao:")
-    print(cm)
+    # ----------------------------
+    # Métricas no esquema nativo
+    # ----------------------------
+    results = {}
 
-    return {"loss": loss, "acc": acc, "f1": f1, "cm": cm}
+    cm_native = confusion_matrix(all_gts, all_preds, labels=list(range(n_cls)))
+    acc_native = accuracy_score(all_gts, all_preds)
+    f1_native  = f1_score(all_gts, all_preds, average="macro")
+
+    print(f"[EVAL {split_name}] ({cfg.schema}) loss={loss:.4f} acc={acc_native:.4f} f1={f1_native:.4f}")
+    print("Matriz de confusão (schema nativo):")
+    print(cm_native)
+
+    results[cfg.schema.upper()] = {
+        "loss": float(loss),
+        "acc": float(acc_native),
+        "f1":  float(f1_native),
+        "cm":  cm_native,
+    }
+
+    # -----------------------------------------
+    # Se for S5, derivar S1–S4 a partir de S5
+    # -----------------------------------------
+    if cfg.schema == "s5":
+        # Cada tupla: (nome_do_schema, função_de_colapso, número_de_classes)
+        derived_schemes = [
+            ("S1", collapse_to_S1, 2),
+            ("S2", collapse_to_S2, 2),
+            ("S3", collapse_to_S3, 4),
+            ("S4", collapse_to_S4, 6),
+        ]
+
+        for name, collapse_fn, n_out in derived_schemes:
+            y_true = collapse_fn(all_gts)
+            y_pred = collapse_fn(all_preds)
+
+            cm = confusion_matrix(y_true, y_pred, labels=list(range(n_out)))
+            acc = accuracy_score(y_true, y_pred)
+            f1  = f1_score(y_true, y_pred, average="macro")
+
+            print(f"[EVAL {split_name}] (derivado {name}) acc={acc:.4f} f1={f1:.4f}")
+            print(f"Matriz de confusão derivada ({name}):")
+            print(cm)
+
+            results[name] = {
+                "acc": float(acc),
+                "f1":  float(f1),
+                "cm":  cm,
+            }
+
+    return results
 
 
 # ------------- launcher -------------
